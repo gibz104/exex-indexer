@@ -125,6 +125,7 @@ async fn write_headers(connection: &Client, blocks: impl Iterator<Item = SealedB
                 json!(header.base_fee_per_gas.unwrap_or_default()),
                 json!(header.blob_gas_used.unwrap_or_default()),
                 json!(header.excess_blob_gas.unwrap_or_default()),
+                json!(String::from_utf8_lossy(header.extra_data.as_ref())),
                 json!(Utc::now().format("%Y-%m-%d %H:%M:%S.%3f").to_string()),
             ],
         };
