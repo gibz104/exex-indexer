@@ -12,6 +12,7 @@ use reth_tracing::tracing::{info, warn};
 use reqwest::Client;
 use serde_json::json;
 use rbuilder_types::PayloadDeliveredFetcher;
+use chrono::Utc;
 
 // Define a struct for the insert request
 #[derive(Serialize)]
@@ -51,7 +52,8 @@ async fn create_tables(connection: &Client) -> Result<()> {
             base_fee_per_gas BIGINT,
             blob_gas_used    INTEGER,
             excess_blob_gas  INTEGER,
-            extra_data       VARCHAR NOT NULL
+            extra_data       VARCHAR NOT NULL,
+            updated_at       TIMESTAMP_MS NOT NULL
         );
         "#,
         r#"
@@ -71,6 +73,7 @@ async fn create_tables(connection: &Client) -> Result<()> {
             timestamp        BIGINT NOT NULL,
             timestamp_ms     BIGINT NOT NULL,
             optimistic_submission BOOLEAN NOT NULL,
+            updated_at       TIMESTAMP_MS NOT NULL,
             PRIMARY KEY (block_number, relay_id)
         );
         "#,
@@ -108,7 +111,7 @@ async fn write_headers(connection: &Client, blocks: impl Iterator<Item = SealedB
             columns: vec![
                 "block_number", "timestamp", "parent_hash", "hash", "beneficiary",
                 "difficulty", "gas_limit", "gas_used", "base_fee_per_gas",
-                "blob_gas_used", "excess_blob_gas", "extra_data"
+                "blob_gas_used", "excess_blob_gas", "extra_data", "updated_at"
             ].into_iter().map(String::from).collect(),
             values: vec![
                 json!(header.number),
@@ -122,7 +125,7 @@ async fn write_headers(connection: &Client, blocks: impl Iterator<Item = SealedB
                 json!(header.base_fee_per_gas.unwrap_or_default()),
                 json!(header.blob_gas_used.unwrap_or_default()),
                 json!(header.excess_blob_gas.unwrap_or_default()),
-                json!(header.extra_data.to_string()),
+                json!(Utc::now().format("%Y-%m-%d %H:%M:%S.%3f").to_string()),
             ],
         };
 
@@ -169,7 +172,7 @@ async fn write_mevboost_data(connection: &Client, blocks: impl Iterator<Item = S
                 columns: vec![
                     "block_number", "relay_id", "slot", "parent_hash", "block_hash", "builder_pubkey",
                     "proposer_pubkey", "proposer_fee_recipient", "gas_limit", "gas_used", "value",
-                    "num_tx", "timestamp", "timestamp_ms", "optimistic_submission"
+                    "num_tx", "timestamp", "timestamp_ms", "optimistic_submission", "updated_at"
                 ].into_iter().map(String::from).collect(),
                 values: vec![
                     json!(block.block_number),
@@ -187,6 +190,7 @@ async fn write_mevboost_data(connection: &Client, blocks: impl Iterator<Item = S
                     json!(block.timestamp),
                     json!(block.timestamp_ms),
                     json!(block.optimistic_submission),
+                    json!(Utc::now().format("%Y-%m-%d %H:%M:%S.%3f").to_string()),
                 ],
             };
 
