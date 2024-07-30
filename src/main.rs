@@ -8,7 +8,7 @@ use reth_exex::{ExExContext, ExExEvent};
 use reth_node_api::FullNodeComponents;
 use reth_node_ethereum::EthereumNode;
 use reth_primitives::{BlockHash, Header, SealedBlockWithSenders};
-use reth_tracing::tracing::info;
+use reth_tracing::tracing::{info, warn};
 use reqwest::Client;
 use serde_json::json;
 use rbuilder_types::PayloadDeliveredFetcher;
@@ -153,6 +153,14 @@ async fn write_mevboost_data(connection: &Client, blocks: impl Iterator<Item = S
         let block_number = block.block.header.header().number;
         let fetcher = PayloadDeliveredFetcher::default();
         let result = fetcher.get_payload_delivered(block_number).await;
+
+        // Log any relay errors
+        if !result.relay_errors.is_empty() {
+            for (relay_id, error) in &result.relay_errors {
+                warn!("Relay error for block {}: Relay ID: {}, Error: {:?}", block_number, relay_id, error);
+            }
+        }
+
         let blocks_delivered = result.delivered;
 
         for (relay_id, block) in blocks_delivered {
