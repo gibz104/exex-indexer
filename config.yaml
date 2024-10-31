@@ -1,0 +1,9 @@
+enabled_events:
+  HeaderEvent: true
+  TransactionsEvent: true
+  LogsEvent: true
+  BuilderBidsEvent: true
+  ProposerPayloadsEvent: true
+  OmmersEvent: true
+  WithdrawalsEvent: true
+  Erc20TransfersEvent: true
