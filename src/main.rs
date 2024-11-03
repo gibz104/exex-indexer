@@ -15,18 +15,25 @@ use futures::{Future, TryStreamExt};
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
 use reth_node_api::FullNodeComponents;
 use reth_node_ethereum::EthereumNode;
-use reth_primitives::{SealedBlockWithSenders, Receipt};
+use reth_primitives::{SealedBlockWithSenders, Receipt, BlockId, BlockNumberOrTag};
 use reth_tracing::tracing::{info, warn};
 use std::{sync::Arc, time::Duration};
+use std::time::Instant;
 use tokio::{task, sync::mpsc, time};
 use tokio_postgres::Client;
+use reth::primitives::{EthereumHardforks};
+use reth::builder::NodeTypes;
 
 /// Initializes the ExEx.
 ///
 /// Connects to the PostgreSQL database and creates the tables.
 async fn init<Node: FullNodeComponents>(
     ctx: ExExContext<Node>,
-) -> Result<impl Future<Output = Result<()>>> {
+) -> Result<impl Future<Output = Result<()>>>
+where
+    Node::Types: NodeTypes,
+    <Node::Types as NodeTypes>::ChainSpec: EthereumHardforks,
+{
     let config = Config::load().wrap_err("Failed to load configuration")?;
     let client = connect_to_postgres().await?;
     create_tables(&client).await?;
@@ -48,22 +55,40 @@ async fn indexer_exex<Node: FullNodeComponents>(
     mut ctx: ExExContext<Node>,
     client: Arc<Client>,
     indexer: Arc<Indexer>,
-) -> Result<()> {
+) -> Result<()>
+where
+    Node::Types: NodeTypes,
+    <Node::Types as NodeTypes>::ChainSpec: EthereumHardforks,
+{
     let (block_sender, mut block_receiver) = mpsc::channel::<(SealedBlockWithSenders, Vec<Option<Receipt>>)>(100);
 
     // Spawn a task to process blocks
     let process_task = task::spawn({
         let client = Arc::clone(&client);
         let indexer = Arc::clone(&indexer);
+        let trace_api = utils::create_trace_api(&ctx);
+
         async move {
             while let Some(block_data) = block_receiver.recv().await {
                 let block_data = Arc::new(block_data);
-                if let Err(e) = indexer.process_block(Arc::clone(&block_data), Arc::clone(&client)).await {
+                let block_number = block_data.0.block.header.header().number;
+                let block_id = BlockId::Number(BlockNumberOrTag::from(block_number));
+
+                // Get traces once for the block
+                let block_traces = match trace_api.trace_block(block_id).await {
+                    Ok(traces) => traces,
+                    Err(e) => {
+                        warn!("Failed to get traces for block {}: {}", block_number, e);
+                        None
+                    }
+                };
+
+                if let Err(e) = indexer.process_block(Arc::clone(&block_data), Arc::clone(&client), &block_traces).await {
                     warn!(
-                    "Failed to process block {}: {}",
-                    block_data.0.block.header.header().number,
-                    e
-                );
+                        "Failed to process block {}: {}",
+                        block_data.0.block.header.header().number,
+                        e
+                    );
                 }
             }
         }

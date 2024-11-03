@@ -7,3 +7,4 @@ enabled_events:
   OmmersEvent: true
   WithdrawalsEvent: true
   Erc20TransfersEvent: true
+  TracesEvent: true

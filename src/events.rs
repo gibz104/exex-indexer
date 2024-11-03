@@ -18,9 +18,10 @@ use tokio::sync::Semaphore;
 use futures_util::{pin_mut, future::join_all};
 use lazy_static::lazy_static;
 use primitive_types::{H256, U256};
+use alloy_rpc_types_trace::{parity::Action};
+use alloy_rpc_types_trace::parity::{LocalizedTransactionTrace, TraceOutput};
 
 lazy_static! {
-    /// Transfer event signature hash
     static ref ERC20_TRANSFER_TOPIC: H256 = H256(
         <[u8; 32]>::try_from(hex::decode("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
             .expect("Static transfer topic decoding failed")).unwrap()
@@ -36,7 +37,7 @@ pub trait ProcessingEvent: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Process the block data
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult>;
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult>;
 
     /// Revert the processed data for given block numbers
     async fn revert(&self, block_numbers: &[i64], client: &Arc<Client>) -> eyre::Result<()>;
@@ -51,7 +52,7 @@ impl ProcessingEvent for HeaderEvent {
         "HeaderEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let header: &Header = block.block.header.header();
         let hash: BlockHash = block.block.header.hash();
@@ -99,7 +100,7 @@ impl ProcessingEvent for TransactionsEvent {
         "TransactionsEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let receipts = &block_data.1;
         let transactions: Vec<TransactionSigned> = block.block.body.transactions.to_vec();
@@ -238,7 +239,7 @@ impl ProcessingEvent for LogsEvent {
         "LogsEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let receipts = &block_data.1;
         let block_number = block.block.header.header().number;
@@ -342,7 +343,7 @@ impl ProcessingEvent for BuilderBidsEvent {
         "BuilderBidsEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let block_number = block.block.header.header().number;
         let semaphore = Arc::new(Semaphore::new(10));
@@ -454,7 +455,7 @@ impl ProcessingEvent for ProposerPayloadsEvent {
         "ProposerPayloadsEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let block_number = block.block.header.header().number;
         let semaphore = Arc::new(Semaphore::new(10));
@@ -574,7 +575,7 @@ impl ProcessingEvent for OmmersEvent {
         "OmmersEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let block_number = block.block.header.header().number;
         let block_hash = block.block.header.hash();
@@ -693,7 +694,7 @@ impl ProcessingEvent for WithdrawalsEvent {
         "WithdrawalsEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let block_number = block.block.header.header().number;
         let block_hash = block.block.header.hash();
@@ -797,7 +798,7 @@ impl ProcessingEvent for Erc20TransfersEvent {
         "Erc20TransfersEvent"
     }
 
-    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, _block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         let block = &block_data.0;
         let receipts = &block_data.1;
         let block_number = block.block.header.header().number;
@@ -886,6 +887,243 @@ impl ProcessingEvent for Erc20TransfersEvent {
     }
 }
 
+#[derive(Clone)]
+pub struct TracesEvent;
+
+#[async_trait]
+impl ProcessingEvent for TracesEvent {
+    fn name(&self) -> &'static str {
+        "TracesEvent"
+    }
+
+    async fn process(
+        &self,
+        block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
+        client: &Arc<Client>,
+        block_traces: Option<Vec<LocalizedTransactionTrace>>,
+    ) -> eyre::Result<ProcessingResult> {
+        let block = &block_data.0;
+        let block_number = block.block.header.header().number;
+        let block_hash = block.block.header.hash();
+        let receipts = &block_data.1;
+
+        // Get traces for the block
+        let traces = match block_traces {
+            Some(traces) => traces,
+            None => return Ok(ProcessingResult { records_written: 0 }),
+        };
+
+        // Initialize the COPY command
+        let sink = client
+            .copy_in("COPY traces (
+                block_number,
+                block_hash,
+                transaction_hash,
+                transaction_index,
+                trace_address,
+                subtraces,
+                action_type,
+                from_address,
+                to_address,
+                value,
+                gas,
+                gas_used,
+                input,
+                output,
+                success,
+                tx_success,
+                error,
+                deployed_contract_address,
+                deployed_contract_code,
+                call_type,
+                reward_type,
+                updated_at
+            ) FROM STDIN BINARY")
+            .await?;
+
+        let writer = BinaryCopyInWriter::new(
+            sink,
+            &[
+                Type::INT8,      // block_number
+                Type::TEXT,      // block_hash
+                Type::TEXT,      // transaction_hash
+                Type::INT4,      // transaction_index
+                Type::TEXT,      // trace_address
+                Type::INT4,      // subtraces
+                Type::TEXT,      // action_type
+                Type::TEXT,      // from_address
+                Type::TEXT,      // to_address
+                Type::TEXT,      // value
+                Type::INT8,      // gas
+                Type::INT8,      // gas_used
+                Type::TEXT,      // input
+                Type::TEXT,      // output
+                Type::BOOL,      // success
+                Type::BOOL,      // tx_success
+                Type::TEXT,      // error
+                Type::TEXT,      // deployed_contract_address
+                Type::TEXT,      // deployed_contract_code
+                Type::TEXT,      // call_type
+                Type::TEXT,      // reward_type
+                Type::TIMESTAMPTZ, // updated_at
+            ],
+        );
+        pin_mut!(writer);
+
+        let mut records_written = 0;
+
+        for trace in traces {
+            let trace_address = trace.trace.trace_address
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            // Get transaction success status from receipts if available
+            let tx_success = trace.transaction_hash
+                .and_then(|tx_hash| {
+                    block.block.body.transactions.iter()
+                        .position(|tx| tx.hash() == tx_hash)
+                        .and_then(|idx| receipts.get(idx))
+                        .and_then(|r| r.as_ref())
+                        .map(|receipt| receipt.success)
+                });
+
+            let (
+                action_type,
+                from,
+                to,
+                value,
+                gas,
+                input,
+                output,
+                success,
+                deployed_contract_address,
+                deployed_contract_code,
+                call_type,
+                reward_type,
+                gas_used,
+            ) = match &trace.trace.action {
+                Action::Call(call) => (
+                    "call",
+                    Some(call.from.to_string()),
+                    Some(call.to.to_string()),
+                    Some(call.value.to_string()),
+                    Some(call.gas as i64),
+                    Some(hex::encode(&call.input)),
+                    trace.trace.result.as_ref().map(|r| match r {
+                        TraceOutput::Call(call) => hex::encode(&call.output),
+                        _ => String::new(),
+                    }),
+                    trace.trace.result.is_some(),
+                    None,
+                    None,
+                    Some(format!("{:?}", call.call_type)),
+                    None,
+                    trace.trace.result.as_ref().map(|r| r.gas_used() as i64),
+                ),
+                Action::Create(create) => (
+                    "create",
+                    Some(create.from.to_string()),
+                    None,
+                    Some(create.value.to_string()),
+                    Some(create.gas as i64),
+                    Some(hex::encode(&create.init)),
+                    trace.trace.result.as_ref().map(|r| match r {
+                        TraceOutput::Create(create) => hex::encode(&create.code),
+                        _ => String::new(),
+                    }),
+                    trace.trace.result.is_some(),
+                    trace.trace.result.as_ref().and_then(|r| match r {
+                        TraceOutput::Create(create) => Some(create.address.to_string()),
+                        _ => None,
+                    }),
+                    trace.trace.result.as_ref().and_then(|r| match r {
+                        TraceOutput::Create(create) => Some(hex::encode(&create.code)),
+                        _ => None,
+                    }),
+                    None,
+                    None,
+                    trace.trace.result.as_ref().map(|r| r.gas_used() as i64),
+                ),
+                Action::Selfdestruct(selfdestruct) => (
+                    "selfdestruct",
+                    Some(selfdestruct.address.to_string()),
+                    Some(selfdestruct.refund_address.to_string()),
+                    Some(selfdestruct.balance.to_string()),
+                    None,
+                    None,
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                Action::Reward(reward) => (
+                    "reward",
+                    None,
+                    Some(reward.author.to_string()),
+                    Some(reward.value.to_string()),
+                    None,
+                    None,
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                    Some(format!("{:?}", reward.reward_type)),
+                    None,
+                ),
+            };
+
+            writer
+                .as_mut()
+                .write(&[
+                    &(block_number as i64),
+                    &block_hash.to_string(),
+                    &trace.transaction_hash.map(|h| h.to_string()),
+                    &(trace.transaction_position.unwrap_or(0) as i32),
+                    &trace_address,
+                    &(trace.trace.subtraces as i32),
+                    &action_type,
+                    &from,
+                    &to,
+                    &value,
+                    &gas,
+                    &gas_used,
+                    &input,
+                    &output,
+                    &success,
+                    &tx_success,
+                    &trace.trace.error.map(|e| e.to_string()),
+                    &deployed_contract_address,
+                    &deployed_contract_code,
+                    &call_type,
+                    &reward_type,
+                    &Utc::now(),
+                ])
+                .await?;
+
+            records_written += 1;
+        }
+
+        let rows_affected = writer.finish().await?;
+        assert_eq!(records_written, rows_affected as usize);
+
+        Ok(ProcessingResult { records_written })
+    }
+
+    async fn revert(&self, block_numbers: &[i64], client: &Arc<Client>) -> eyre::Result<()> {
+        client.execute(
+            "DELETE FROM traces WHERE block_number = ANY($1::bigint[])",
+            &[&block_numbers]
+        ).await?;
+        Ok(())
+    }
+}
+
 // Event enum
 #[derive(Clone)]
 pub enum Event {
@@ -897,6 +1135,7 @@ pub enum Event {
     Ommers(OmmersEvent),
     Withdrawals(WithdrawalsEvent),
     Erc20Transfers(Erc20TransfersEvent),
+    Traces(TracesEvent),
 }
 
 impl Event {
@@ -910,19 +1149,21 @@ impl Event {
             Event::Ommers(e) => e.name(),
             Event::Withdrawals(e) => e.name(),
             Event::Erc20Transfers(e) => e.name(),
+            Event::Traces(e) => e.name(),
         }
     }
 
-    pub async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>) -> eyre::Result<ProcessingResult> {
+    pub async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
         match self {
-            Event::Header(e) => e.process(block_data, client).await,
-            Event::BuilderBids(e) => e.process(block_data, client).await,
-            Event::Transactions(e) => e.process(block_data, client).await,
-            Event::ProposerPayloads(e) => e.process(block_data, client).await,
-            Event::Logs(e) => e.process(block_data, client).await,
-            Event::Ommers(e) => e.process(block_data, client).await,
-            Event::Withdrawals(e) => e.process(block_data, client).await,
-            Event::Erc20Transfers(e) => e.process(block_data, client).await,
+            Event::Header(e) => e.process(block_data, client, block_traces).await,
+            Event::BuilderBids(e) => e.process(block_data, client, block_traces).await,
+            Event::Transactions(e) => e.process(block_data, client, block_traces).await,
+            Event::ProposerPayloads(e) => e.process(block_data, client, block_traces).await,
+            Event::Logs(e) => e.process(block_data, client, block_traces).await,
+            Event::Ommers(e) => e.process(block_data, client, block_traces).await,
+            Event::Withdrawals(e) => e.process(block_data, client, block_traces).await,
+            Event::Erc20Transfers(e) => e.process(block_data, client, block_traces).await,
+            Event::Traces(e) => e.process(block_data, client, block_traces).await,
         }
     }
 
@@ -936,10 +1177,11 @@ impl Event {
             Event::Ommers(e) => e.revert(block_numbers, client).await,
             Event::Withdrawals(e) => e.revert(block_numbers, client).await,
             Event::Erc20Transfers(e) => e.revert(block_numbers, client).await,
+            Event::Traces(e) => e.revert(block_numbers, client).await,
         }
     }
 
-    pub fn all() -> Vec<Event> {
+    pub fn all() -> Vec<Self> {
         vec![
             Event::Header(HeaderEvent),
             Event::BuilderBids(BuilderBidsEvent),
@@ -949,6 +1191,7 @@ impl Event {
             Event::Ommers(OmmersEvent),
             Event::Withdrawals(WithdrawalsEvent),
             Event::Erc20Transfers(Erc20TransfersEvent),
+            Event::Traces(TracesEvent),
         ]
     }
 }

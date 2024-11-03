@@ -174,6 +174,32 @@ pub async fn create_tables(client: &Client) -> eyre::Result<()> {
             PRIMARY KEY (block_number, transaction_index, log_index)
         );
         "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS traces (
+            block_number                BIGINT NOT NULL,
+            block_hash                  VARCHAR NOT NULL,
+            transaction_hash            VARCHAR,
+            transaction_index           INTEGER NOT NULL,
+            trace_address               TEXT NOT NULL,
+            subtraces                   INTEGER NOT NULL,
+            action_type                 VARCHAR NOT NULL,
+            from_address                VARCHAR,
+            to_address                  VARCHAR,
+            value                       VARCHAR,
+            gas                         BIGINT,
+            gas_used                    BIGINT,
+            input                       TEXT,
+            output                      VARCHAR,
+            success                     BOOLEAN,
+            tx_success                  BOOLEAN,
+            error                       VARCHAR,
+            deployed_contract_address   VARCHAR,
+            deployed_contract_code      VARCHAR,
+            call_type                   VARCHAR,
+            reward_type                 VARCHAR,
+            updated_at                  TIMESTAMP WITH TIME ZONE NOT NULL
+        );
+        "#,
     ];
 
     for query in queries {

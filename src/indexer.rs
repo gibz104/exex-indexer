@@ -7,6 +7,7 @@ use std::time::{Instant, Duration};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use std::sync::Arc;
+use alloy_rpc_types_trace::parity::LocalizedTransactionTrace;
 
 pub struct Indexer {
     events: Vec<Event>,
@@ -44,7 +45,12 @@ impl Indexer {
         &self.events
     }
 
-    pub async fn process_block(&self, block_data: Arc<(SealedBlockWithSenders, Vec<Option<Receipt>>)>, client: Arc<Client>) -> eyre::Result<()> {
+    pub async fn process_block(
+        &self,
+        block_data: Arc<(SealedBlockWithSenders, Vec<Option<Receipt>>)>,
+        client: Arc<Client>,
+        block_traces: &Option<Vec<LocalizedTransactionTrace>>,
+    ) -> eyre::Result<()> {
         let block_number = block_data.0.block.header.header().number;
         let start_time = Instant::now();
 
@@ -54,10 +60,11 @@ impl Indexer {
             if self.config.is_event_enabled(event.name()) {
                 let event = event.clone();
                 let block_data = Arc::clone(&block_data);
+                let block_traces = block_traces.clone();
                 let client = Arc::clone(&client);
                 join_set.spawn(async move {
                     let event_start_time = Instant::now();
-                    let result = event.process(&block_data, &client).await;
+                    let result = event.process(&block_data, &client, block_traces).await;
                     (event.name().to_string(), result, event_start_time.elapsed())
                 });
             }

@@ -11,11 +11,16 @@ reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.
 reth-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.0" }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.0" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.0" }
+reth-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.0" }
+reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.0" }
+reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.0" }
+reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.0" }
 
 alloy-rlp = { version = "0.3.8", features = ["derive"] }
 alloy-primitives = { version = "0.8.8", features = ["serde"] }
 alloy-rpc-types = "0.5.4"
 alloy-rpc-types-beacon = { version = "0.5.4", features = ["ssz"] }
+alloy-rpc-types-trace = { version = "0.4.2", default-features = false }
 
 chrono = "0.4.38"
 eyre = "0.6.12"
