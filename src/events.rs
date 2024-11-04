@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, BlockHash, hex};
+use alloy_primitives::{Address, BlockHash, hex, keccak256};
 use async_trait::async_trait;
 use chrono::Utc;
 use reth_primitives::{
@@ -1124,6 +1124,338 @@ impl ProcessingEvent for TracesEvent {
     }
 }
 
+#[derive(Clone)]
+pub struct NativeTransfersEvent;
+
+#[async_trait]
+impl ProcessingEvent for NativeTransfersEvent {
+    fn name(&self) -> &'static str {
+        "NativeTransfersEvent"
+    }
+
+    async fn process(
+        &self,
+        block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
+        client: &Arc<Client>,
+        block_traces: Option<Vec<LocalizedTransactionTrace>>,
+    ) -> eyre::Result<ProcessingResult> {
+        let block = &block_data.0;
+        let block_number = block.block.header.header().number;
+        let block_hash = block.block.header.hash();
+
+        // Initialize the COPY command
+        let sink = client
+            .copy_in("COPY native_transfers (
+                block_number,
+                block_hash,
+                transaction_index,
+                transfer_index,
+                transaction_hash,
+                from_address,
+                to_address,
+                value,
+                transfer_type,
+                updated_at
+            ) FROM STDIN BINARY")
+            .await?;
+
+        let writer = BinaryCopyInWriter::new(
+            sink,
+            &[
+                Type::INT8,         // block_number
+                Type::TEXT,         // block_hash
+                Type::INT4,         // transaction_index
+                Type::INT4,         // transfer_index
+                Type::TEXT,         // transaction_hash
+                Type::TEXT,         // from_address
+                Type::TEXT,         // to_address
+                Type::TEXT,         // value
+                Type::TEXT,         // transfer_type
+                Type::TIMESTAMPTZ,  // updated_at
+            ],
+        );
+        pin_mut!(writer);
+
+        let mut transfer_index = 0;
+        let mut records_written = 0;
+
+        // Process all traces
+        if let Some(traces) = block_traces {
+            for trace in traces {
+                match &trace.trace.action {
+                    // Regular transfers and internal calls with value
+                    Action::Call(call) if !call.value.is_zero() => {
+                        writer
+                            .as_mut()
+                            .write(&[
+                                &(block_number as i64),
+                                &block_hash.to_string(),
+                                &(trace.transaction_position.map(|p| p as i32).unwrap_or(-1)),
+                                &(transfer_index as i32),
+                                &trace.transaction_hash.map(|h| h.to_string()),
+                                &call.from.to_string(),
+                                &call.to.to_string(),
+                                &call.value.to_string(),
+                                &if trace.trace.trace_address.is_empty() {
+                                    "transaction".to_string()  // Top-level transaction
+                                } else {
+                                    "internal_call".to_string() // Internal transfer
+                                },
+                                &Utc::now(),
+                            ])
+                            .await?;
+
+                        transfer_index += 1;
+                        records_written += 1;
+                    },
+
+                    // Contract creations with value
+                    Action::Create(create) if !create.value.is_zero() => {
+                        let to_address = trace.trace.result
+                            .as_ref()
+                            .and_then(|r| match r {
+                                TraceOutput::Create(create) => Some(create.address.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "0x0".to_string());
+
+                        writer
+                            .as_mut()
+                            .write(&[
+                                &(block_number as i64),
+                                &block_hash.to_string(),
+                                &(trace.transaction_position.map(|p| p as i32).unwrap_or(-1)),
+                                &(transfer_index as i32),
+                                &trace.transaction_hash.map(|h| h.to_string()),
+                                &create.from.to_string(),
+                                &to_address,
+                                &create.value.to_string(),
+                                &"contract_creation".to_string(),
+                                &Utc::now(),
+                            ])
+                            .await?;
+
+                        transfer_index += 1;
+                        records_written += 1;
+                    },
+
+                    // Self-destructs with remaining balance
+                    Action::Selfdestruct(selfdestruct) if !selfdestruct.balance.is_zero() => {
+                        writer
+                            .as_mut()
+                            .write(&[
+                                &(block_number as i64),
+                                &block_hash.to_string(),
+                                &(trace.transaction_position.map(|p| p as i32).unwrap_or(-1)),
+                                &(transfer_index as i32),
+                                &trace.transaction_hash.map(|h| h.to_string()),
+                                &selfdestruct.address.to_string(),
+                                &selfdestruct.refund_address.to_string(),
+                                &selfdestruct.balance.to_string(),
+                                &"selfdestruct".to_string(),
+                                &Utc::now(),
+                            ])
+                            .await?;
+
+                        transfer_index += 1;
+                        records_written += 1;
+                    },
+
+                    // Block rewards
+                    Action::Reward(reward) => {
+                        writer
+                            .as_mut()
+                            .write(&[
+                                &(block_number as i64),
+                                &block_hash.to_string(),
+                                &-1, // no transaction index for rewards
+                                &(transfer_index as i32),
+                                &None::<String>, // no transaction hash for rewards
+                                &"0x0".to_string(), // rewards come from null address
+                                &reward.author.to_string(),
+                                &reward.value.to_string(),
+                                &format!("{:?}_reward", reward.reward_type),
+                                &Utc::now(),
+                            ])
+                            .await?;
+
+                        transfer_index += 1;
+                        records_written += 1;
+                    },
+
+                    _ => {} // Ignore other trace types
+                }
+            }
+        }
+
+        let rows_affected = writer.finish().await?;
+        assert_eq!(records_written, rows_affected as usize);
+
+        Ok(ProcessingResult { records_written })
+    }
+
+    async fn revert(&self, block_numbers: &[i64], client: &Arc<Client>) -> eyre::Result<()> {
+        client.execute(
+            "DELETE FROM native_transfers WHERE block_number = ANY($1::bigint[])",
+            &[&block_numbers]
+        ).await?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct ContractsEvent;
+
+impl ContractsEvent {
+    fn find_deployer(traces: &[LocalizedTransactionTrace], current_trace: &LocalizedTransactionTrace) -> Option<Address> {
+        // For any trace (nested or not), we want to find the originating EOA
+        // that started the transaction chain. This is always in the top-level trace
+        // (i.e. the one with empty trace_address)
+        current_trace.transaction_hash.and_then(|tx_hash| {
+            traces.iter()
+                .find(|trace|
+                    // Match both transaction hash and empty trace address
+                    trace.transaction_hash == Some(tx_hash) &&
+                    trace.trace.trace_address.is_empty()
+                )
+                .and_then(|trace| match &trace.trace.action {
+                    Action::Call(call) => Some(call.from),
+                    Action::Create(create) => Some(create.from),
+                    _ => None,
+                })
+        })
+    }
+}
+
+#[async_trait]
+impl ProcessingEvent for ContractsEvent {
+    fn name(&self) -> &'static str {
+        "ContractsEvent"
+    }
+
+    async fn process(&self, block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>), client: &Arc<Client>, block_traces: Option<Vec<LocalizedTransactionTrace>>) -> eyre::Result<ProcessingResult> {
+        let block = &block_data.0;
+        let block_number = block.block.header.header().number;
+        let block_hash = block.block.header.hash();
+
+        // Get traces for the block
+        let traces = match block_traces {
+            Some(traces) => traces,
+            None => return Ok(ProcessingResult { records_written: 0 }),
+        };
+
+        // Initialize the COPY command
+        let sink = client
+            .copy_in("COPY contracts (
+                block_number,
+                block_hash,
+                create_index,
+                transaction_hash,
+                contract_address,
+                deployer,
+                factory,
+                init_code,
+                code,
+                init_code_hash,
+                n_init_code_bytes,
+                n_code_bytes,
+                code_hash,
+                chain_id,
+                updated_at
+            ) FROM STDIN BINARY")
+            .await?;
+
+        let writer = BinaryCopyInWriter::new(
+            sink,
+            &[
+                Type::INT8,        // block_number
+                Type::TEXT,        // block_hash
+                Type::INT4,        // create_index
+                Type::TEXT,        // transaction_hash
+                Type::TEXT,        // contract_address
+                Type::TEXT,        // deployer
+                Type::TEXT,        // factory
+                Type::TEXT,        // init_code
+                Type::TEXT,        // code
+                Type::TEXT,        // init_code_hash
+                Type::INT4,        // n_init_code_bytes
+                Type::INT4,        // n_code_bytes
+                Type::TEXT,        // code_hash
+                Type::INT8,        // chain_id
+                Type::TIMESTAMPTZ, // updated_at
+            ],
+        );
+        pin_mut!(writer);
+
+        let mut records_written = 0;
+        let mut create_index = 0;
+
+        for trace in &traces {
+            if let Action::Create(create) = &trace.trace.action {
+                let init_code = &create.init;
+                let init_code_hash = keccak256(init_code);
+
+                // Get deployed code from trace result
+                let (contract_address, deployed_code) = match &trace.trace.result {
+                    Some(TraceOutput::Create(result)) => {
+                        (result.address.to_vec(), result.code.clone())
+                    },
+                    _ => continue, // Skip if no result or wrong type
+                };
+
+                let code_hash = keccak256(&deployed_code);
+
+                // Find the original deployer (EOA that initiated the transaction)
+                let deployer = Self::find_deployer(&traces, trace)
+                    .map(|addr| addr.to_vec())
+                    .unwrap_or_else(|| vec![0; 20]); // Use zero address if we can't find deployer
+
+                // Factory is the immediate creator of the contract
+                let factory = create.from.to_vec();
+
+                writer
+                    .as_mut()
+                    .write(&[
+                        &(block_number as i64),
+                        &block_hash.to_string(),
+                        &(create_index as i32),
+                        &trace.transaction_hash.map(|h| h.to_string()).unwrap_or_default(),
+                        &Address::from_slice(&contract_address).to_string(),
+                        &Address::from_slice(&deployer).to_string(),
+                        &Address::from_slice(&factory).to_string(),
+                        &hex::encode(init_code),
+                        &hex::encode(&deployed_code),
+                        &hex::encode(&init_code_hash),
+                        &(init_code.len() as i32),
+                        &(deployed_code.len() as i32),
+                        &hex::encode(&code_hash),
+                        &trace.transaction_hash
+                            .and_then(|_| block.block.body.transactions[trace.transaction_position.unwrap_or(0) as usize].chain_id())
+                            .map(|id| id as i64),
+                        &Utc::now(),
+                    ])
+                    .await?;
+
+                create_index += 1;
+                records_written += 1;
+            }
+        }
+
+        let rows_affected = writer.finish().await?;
+        assert_eq!(records_written, rows_affected as usize);
+
+        Ok(ProcessingResult { records_written })
+    }
+
+    async fn revert(&self, block_numbers: &[i64], client: &Arc<Client>) -> eyre::Result<()> {
+        client.execute(
+            "DELETE FROM contracts WHERE block_number = ANY($1::bigint[])",
+            &[&block_numbers]
+        ).await?;
+        Ok(())
+    }
+}
+
 // Event enum
 #[derive(Clone)]
 pub enum Event {
@@ -1136,6 +1468,8 @@ pub enum Event {
     Withdrawals(WithdrawalsEvent),
     Erc20Transfers(Erc20TransfersEvent),
     Traces(TracesEvent),
+    NativeTransfers(NativeTransfersEvent),
+    Contracts(ContractsEvent),
 }
 
 impl Event {
@@ -1150,6 +1484,8 @@ impl Event {
             Event::Withdrawals(e) => e.name(),
             Event::Erc20Transfers(e) => e.name(),
             Event::Traces(e) => e.name(),
+            Event::NativeTransfers(e) => e.name(),
+            Event::Contracts(e) => e.name(),
         }
     }
 
@@ -1164,6 +1500,8 @@ impl Event {
             Event::Withdrawals(e) => e.process(block_data, client, block_traces).await,
             Event::Erc20Transfers(e) => e.process(block_data, client, block_traces).await,
             Event::Traces(e) => e.process(block_data, client, block_traces).await,
+            Event::NativeTransfers(e) => e.process(block_data, client, block_traces).await,
+            Event::Contracts(e) => e.process(block_data, client, block_traces).await,
         }
     }
 
@@ -1178,6 +1516,8 @@ impl Event {
             Event::Withdrawals(e) => e.revert(block_numbers, client).await,
             Event::Erc20Transfers(e) => e.revert(block_numbers, client).await,
             Event::Traces(e) => e.revert(block_numbers, client).await,
+            Event::NativeTransfers(e) => e.revert(block_numbers, client).await,
+            Event::Contracts(e) => e.revert(block_numbers, client).await,
         }
     }
 
@@ -1192,6 +1532,8 @@ impl Event {
             Event::Withdrawals(WithdrawalsEvent),
             Event::Erc20Transfers(Erc20TransfersEvent),
             Event::Traces(TracesEvent),
+            Event::NativeTransfers(NativeTransfersEvent),
+            Event::Contracts(ContractsEvent),
         ]
     }
 }

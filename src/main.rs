@@ -18,7 +18,6 @@ use reth_node_ethereum::EthereumNode;
 use reth_primitives::{SealedBlockWithSenders, Receipt, BlockId, BlockNumberOrTag};
 use reth_tracing::tracing::{info, warn};
 use std::{sync::Arc, time::Duration};
-use std::time::Instant;
 use tokio::{task, sync::mpsc, time};
 use tokio_postgres::Client;
 use reth::primitives::{EthereumHardforks};

@@ -200,6 +200,42 @@ pub async fn create_tables(client: &Client) -> eyre::Result<()> {
             updated_at                  TIMESTAMP WITH TIME ZONE NOT NULL
         );
         "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS native_transfers (
+            block_number                BIGINT NOT NULL,
+            block_hash                  VARCHAR NOT NULL,
+            transaction_index           INTEGER,
+            transfer_index              INTEGER NOT NULL,
+            transaction_hash            VARCHAR,
+            from_address                VARCHAR NOT NULL,
+            to_address                  VARCHAR NOT NULL,
+            value                       VARCHAR NOT NULL,
+            transfer_type               VARCHAR NOT NULL,
+            updated_at                  TIMESTAMP WITH TIME ZONE NOT NULL,
+            PRIMARY KEY (block_number, transfer_index)
+        );
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS contracts (
+            block_number                BIGINT NOT NULL,
+            block_hash                  VARCHAR NOT NULL,
+            create_index                INTEGER NOT NULL,
+            transaction_hash            VARCHAR NOT NULL,
+            contract_address            VARCHAR NOT NULL,
+            deployer                    VARCHAR NOT NULL,
+            factory                     VARCHAR NOT NULL,
+            init_code                   VARCHAR NOT NULL,
+            code                        VARCHAR NOT NULL,
+            init_code_hash              VARCHAR NOT NULL,
+            n_init_code_bytes           INTEGER NOT NULL,
+            n_code_bytes                INTEGER NOT NULL,
+            code_hash                   VARCHAR NOT NULL,
+            chain_id                    BIGINT,
+            updated_at                  TIMESTAMP WITH TIME ZONE NOT NULL,
+            PRIMARY KEY (contract_address),
+            UNIQUE (block_number, create_index)
+        );
+        "#,
     ];
 
     for query in queries {

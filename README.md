@@ -17,8 +17,8 @@ Reth's Execution Extensions (ExEx) framework is used for efficient real-time blo
 | Builder Bids      | Off-chain (mevboost) | BuilderBidsEvent      | builder_bids      |
 | Proposer Payloads | Off-chain (mevboost) | ProposerPayloadsEvent | proposer_payloads |
 | ERC-20 Transfers  | Derived (logs)       | Erc20TransfersEvent   | erc20_transfers   |
-| Native Transfers  | Derived (traces)     |                       |                   |
-| Contracts         | Derived (traces)     |                       |                   |
+| Native Transfers  | Derived (traces)     | NativeTransfersEvent  | native_transfers  |
+| Contracts         | Derived (traces)     | ContractsEvent        | contracts         |
 
 
 # Setup
@@ -68,11 +68,14 @@ indexer flexibility in the types of processing it can support.
 # Database schema
 - `Headers` - Canonical block headers
 - `Transactions` - Canonical block transactions
-- `Builder Bids` - Block builder header submissions to mev-boost relays; contains block bid values and timestamps (in ms) relay received the bid
-- `Proposer Payloads` - Block header mev-boost relays sent to block proposer
 - `Logs` - Smart contract log events emitted from canonical blocks
+- `Traces` - Transaction traces for canonical blocks (does not include pending transaction traces)
 - `Uncles` - Uncle block headers
 - `Withdrawals` - Validator withdrawals from the beacon chain that were processed in canonical blocks
+- `Builder Bids` - Block builder header submissions to mev-boost relays; contains block bid values and timestamps (in ms) relay received the bid
+- `Proposer Payloads` - Block header mev-boost relays sent to block proposer
 - `ERC-20 Transfers` - ERC-20 transfers between addresses, based on emitted contract log events
+- `Native Transfers` - Native ETH transfers as determined by transaction traces (regular transfers and internal calls with value)
+- `Contracts` - Deployed contracts (and their code) based on transaction trace "create" actions 
 
 ![img.png](assets/img.png)

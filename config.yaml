@@ -8,3 +8,5 @@ enabled_events:
   WithdrawalsEvent: true
   Erc20TransfersEvent: true
   TracesEvent: true
+  NativeTransfersEvent: true
+  ContractsEvent: true
