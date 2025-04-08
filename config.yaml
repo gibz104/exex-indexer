@@ -1,12 +1,38 @@
 enabled_events:
-  HeaderEvent: true
-  TransactionsEvent: true
-  LogsEvent: true
-  BuilderBidsEvent: true
-  ProposerPayloadsEvent: true
-  OmmersEvent: true
-  WithdrawalsEvent: true
-  Erc20TransfersEvent: true
-  TracesEvent: true
-  NativeTransfersEvent: true
-  ContractsEvent: true
+  Headers: true
+  Transactions: true
+  Logs: true
+  Erc20Transfers: true
+  Erc20Metadata: true
+  Traces: true
+  NativeTransfers: true
+  Contracts: true
+  UniV2Pools: true
+  UniV3Pools: true
+  UniV4Pools: true
+  UniV2PoolVolumeTVL: true
+  UniV3PoolVolumeTVL: true
+
+# Configuration for specific datasets
+UniV2PoolVolumeTVL:
+  pools:
+    - "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc"  # USDC/WETH
+    - "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852"  # WETH/USDT
+    - "0x9C4Fe5FFD9A9fC5678cFBd93Aa2D4FD684b67C4C"  # PAXG/WETH
+    - "0xBb2b8038a1640196FbE3e38816F3e67Cba72D940"  # WBTC/WETH
+    - "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11"  # DAI/WETH
+    - "0xd3d2E2692501A5c9Ca623199D38826e513033a17"  # UNI/WETH
+    - "0x3041CbD36888bECc7bbCBc0045E3B1f144466f5f"  # USDC/USDT
+    - "0xa2107FA5B38d9bbd2C461D6EDf11B11A50F6b974"  # LINK/WETH
+
+UniV3PoolVolumeTVL:
+  pools:
+    - "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"  # USDC/WETH (0.05%)
+    - "0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35"  # WBTC/USDC (0.3%)
+    - "0xCBCdF9626bC03E24f779434178A73a0B4bad62eD"  # WBTC/WETH (0.3%)
+    - "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"  # WETH/USDT (0.3%)
+    - "0x5777d92f208679DB4b9778590Fa3CAB3aC9e2168"  # DAI/USDC (0.01%)
+    - "0x4585FE77225b41b697C938B018E2Ac67Ac5a20c0"  # WBTC/WETH (0.05%)
+    - "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8"  # USDC/WETH (0.3%)
+    - "0x9Db9e0e53058C89e5B94e29621a205198648425B"  # WBTC/USDT (0.3%)
+    - "0x1d42064Fc4Beb5F8aAF85F4617AE8b3b5B8Bd801"  # UNI/WETH (0.3%)
