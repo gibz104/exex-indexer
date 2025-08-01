@@ -1,4 +1,4 @@
-# <h1 align="center">exex-indexer-priv</h1>
+# <h1 align="center">exex-indexer</h1>
 
 **A real-time Ethereum indexer that writes on-chain data to a postgres database.
 Reth's Execution Extensions (ExEx) framework is used for efficient real-time block notifications and processing.
