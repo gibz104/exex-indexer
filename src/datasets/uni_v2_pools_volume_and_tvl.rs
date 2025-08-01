@@ -1,5 +1,5 @@
 use crate::record_values;
-use crate::indexer::ProcessingComponents;
+use crate::indexer::{ProcessingComponents, EthereumBlockData};
 use crate::db_writer::DbWriter;
 use alloy::{
     sol,
@@ -7,20 +7,15 @@ use alloy::{
     primitives::{address, b256, Address, B256, U256, U160, U128, U32, keccak256},
     primitives::aliases::U112
 };
-use alloy_consensus::BlockHeader;
 use reth::providers::{StateProviderFactory};
 use reth_node_api::FullNodeComponents;
-use reth_primitives::{SealedBlockWithSenders, Receipt};
 use eyre::Result;
 use chrono::Utc;
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::helpers::FullEthApi;
 use alloy_rpc_types::{state::EvmOverrides, BlockId};
-use alloy_rpc_types_eth::transaction::TransactionRequest;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
-use reth_rpc::EthApi;
-use reth_rpc_eth_api::FullEthApiTypes;
-use reth_rpc_eth_api::helpers::{Call, LoadPendingBlock};
+use alloy_network::TransactionBuilder;
 use serde::Deserialize;
 
 // Add Swap event definition
@@ -313,16 +308,18 @@ impl UniV2PriceOracle {
     }
 }
 
-pub async fn process_uni_v2_pools_volume_and_tvl<Node: FullNodeComponents>(
-    block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-    components: ProcessingComponents<Node>,
+pub async fn process_uni_v2_pools_volume_and_tvl<Node: FullNodeComponents, EthApi: FullEthApi>(
+    block_data: &EthereumBlockData,
+    components: ProcessingComponents<Node, EthApi>,
     writer: &mut DbWriter,
 ) -> Result<()>
 where
-    EthApi<Node::Provider, Node::Pool, Node::Network, Node::Evm>: Call + LoadPendingBlock + FullEthApiTypes,
+    EthApi: reth_rpc_eth_api::EthApiTypes,
+    <EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes: reth_rpc_convert::RpcTypes + alloy_network::Network,
+    <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes>,
 {
-    let block_number = block_data.0.block.header.number();
-    let block_hash = block_data.0.block.hash();
+    let block_number = block_data.0.num_hash().number;
+    let block_hash = block_data.0.num_hash().hash;
     let mut oracle = UniV2PriceOracle::new(WETH_ADDRESS, USDC_ADDRESS, USDT_ADDRESS);
 
     // Get configured pools from config
@@ -368,16 +365,15 @@ where
 
         // Get decimals for both tokens
         let decimals0 = {
-            let tx_request = TransactionRequest::default()
-                .to(token0)
-                .input(IERC20::decimalsCall::SELECTOR.to_vec().into());
+            let mut tx_req = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+            tx_req = tx_req.with_to(token0).with_input(IERC20::decimalsCall::SELECTOR.to_vec());
 
-            match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
+            match components.eth_api.call(tx_req, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                 Ok(output) => {
                     let output_vec = output.to_vec();
-                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec, true);
+                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec);
                     match decoded {
-                        Ok(decimals) => decimals._0 as u8,
+                        Ok(decimals) => decimals as u8,
                         Err(_) => 18
                     }
                 },
@@ -386,16 +382,15 @@ where
         };
 
         let decimals1 = {
-            let tx_request = TransactionRequest::default()
-                .to(token1)
-                .input(IERC20::decimalsCall::SELECTOR.to_vec().into());
+            let mut tx_req = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+            tx_req = tx_req.with_to(token1).with_input(IERC20::decimalsCall::SELECTOR.to_vec());
 
-            match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
+            match components.eth_api.call(tx_req, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                 Ok(output) => {
                     let output_vec = output.to_vec();
-                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec, true);
+                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec);
                     match decoded {
-                        Ok(decimals) => decimals._0 as u8,
+                        Ok(decimals) => decimals as u8,
                         Err(_) => 18
                     }
                 },
@@ -453,54 +448,52 @@ where
 
     // Process Swap events from logs
     let receipts = &block_data.1;
-    for (_tx, receipt) in block_data.0.transactions().into_iter().zip(receipts) {
-        if let Some(receipt) = receipt {
-            for log in &receipt.logs {
-                // Check if the log is from one of our tracked pools
-                if !pool_addresses.contains(&log.address) {
-                    continue;
+    for (_tx, receipt) in block_data.0.body().transactions.iter().zip(receipts) {
+        for log in &receipt.logs {
+            // Check if the log is from one of our tracked pools
+            if !pool_addresses.contains(&log.address) {
+                continue;
+            }
+
+            // Check if this is a Swap event
+            if log.topics().get(0) != Some(&Swap::SIGNATURE_HASH) {
+                continue;
+            }
+
+            // Get pool metadata
+            let metadata = match pool_metadata.get(&log.address) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            match Swap::decode_raw_log(log.topics(), &log.data.data) {
+                Ok(swap) => {
+                    let entry = pool_trades.entry(log.address).or_insert((0, 0.0));
+                    entry.0 += 1; // Increment trade count
+
+                    // Calculate volume for token0 side
+                    let amount0_in = f64::from(U128::from(swap.amount0In)) / 10f64.powi(metadata.decimals0 as i32);
+                    let amount0_out = f64::from(U128::from(swap.amount0Out)) / 10f64.powi(metadata.decimals0 as i32);
+                    let volume0 = amount0_in.max(amount0_out);
+
+                    // Calculate volume for token1 side
+                    let amount1_in = f64::from(U128::from(swap.amount1In)) / 10f64.powi(metadata.decimals1 as i32);
+                    let amount1_out = f64::from(U128::from(swap.amount1Out)) / 10f64.powi(metadata.decimals1 as i32);
+                    let volume1 = amount1_in.max(amount1_out);
+
+                    // Get token prices using the oracle (which now has the initial reserves)
+                    let price0 = oracle.get_token_price(metadata.token0, None);
+                    let price1 = oracle.get_token_price(metadata.token1, None);
+
+                    // Calculate USD volumes
+                    let volume0_usd = price0.map(|p| volume0 * p).unwrap_or(0.0);
+                    let volume1_usd = price1.map(|p| volume1 * p).unwrap_or(0.0);
+
+                    // Use the larger USD volume
+                    entry.1 += volume0_usd.max(volume1_usd);
                 }
-
-                // Check if this is a Swap event
-                if log.topics().get(0) != Some(&Swap::SIGNATURE_HASH) {
-                    continue;
-                }
-
-                // Get pool metadata
-                let metadata = match pool_metadata.get(&log.address) {
-                    Some(m) => m,
-                    None => continue,
-                };
-
-                match Swap::decode_raw_log(log.topics(), &log.data.data, true) {
-                    Ok(swap) => {
-                        let entry = pool_trades.entry(log.address).or_insert((0, 0.0));
-                        entry.0 += 1; // Increment trade count
-
-                        // Calculate volume for token0 side
-                        let amount0_in = f64::from(U128::from(swap.amount0In)) / 10f64.powi(metadata.decimals0 as i32);
-                        let amount0_out = f64::from(U128::from(swap.amount0Out)) / 10f64.powi(metadata.decimals0 as i32);
-                        let volume0 = amount0_in.max(amount0_out);
-
-                        // Calculate volume for token1 side
-                        let amount1_in = f64::from(U128::from(swap.amount1In)) / 10f64.powi(metadata.decimals1 as i32);
-                        let amount1_out = f64::from(U128::from(swap.amount1Out)) / 10f64.powi(metadata.decimals1 as i32);
-                        let volume1 = amount1_in.max(amount1_out);
-
-                        // Get token prices using the oracle (which now has the initial reserves)
-                        let price0 = oracle.get_token_price(metadata.token0, None);
-                        let price1 = oracle.get_token_price(metadata.token1, None);
-
-                        // Calculate USD volumes
-                        let volume0_usd = price0.map(|p| volume0 * p).unwrap_or(0.0);
-                        let volume1_usd = price1.map(|p| volume1 * p).unwrap_or(0.0);
-
-                        // Use the larger USD volume
-                        entry.1 += volume0_usd.max(volume1_usd);
-                    }
-                    Err(e) => {
-                        println!("Failed to decode swap event: {:?}", e);
-                    }
+                Err(e) => {
+                    println!("Failed to decode swap event: {:?}", e);
                 }
             }
         }
@@ -568,4 +561,3 @@ fn calculate_price(reserve0: U112, reserve1: U112, decimals0: u8, decimals1: u8)
     let reserve1_adjusted = f64::from(U128::from(reserve1)) as f64 * 10f64.powi((18 - decimals1) as i32);
     reserve1_adjusted / reserve0_adjusted
 }
-

@@ -1,20 +1,20 @@
 use crate::record_values;
 use crate::db_writer::DbWriter;
 use alloy_rpc_types_trace::parity::{TraceOutput, Action};
-use reth_primitives::{SealedBlockWithSenders, Receipt};
 use chrono::Utc;
 use eyre::Result;
 use reth_node_api::FullNodeComponents;
-use crate::indexer::ProcessingComponents;
+use reth_rpc_eth_api::helpers::FullEthApi;
+use crate::indexer::{ProcessingComponents, EthereumBlockData};
 
-pub async fn process_native_transfers<Node: FullNodeComponents>(
-    block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-    components: ProcessingComponents<Node>,
+pub async fn process_native_transfers<Node: FullNodeComponents, EthApi: FullEthApi>(
+    block_data: &EthereumBlockData,
+    components: ProcessingComponents<Node, EthApi>,
     writer: &mut DbWriter,
 ) -> Result<()> {
     let block = &block_data.0;
-    let block_number = block.block.header.header().number;
-    let block_hash = block.block.header.hash();
+    let block_number = block.num_hash().number;
+    let block_hash = block.num_hash().hash;
 
     // Process traces for all transfers (both native and internal)
     if let Some(traces) = components.block_traces {
@@ -24,7 +24,7 @@ pub async fn process_native_transfers<Node: FullNodeComponents>(
             // Find transaction position by matching the hash
             let tx_position = block.body().transactions
                 .iter()
-                .position(|tx| tx.hash() == trace.transaction_hash)
+                .position(|tx| *tx.hash() == trace.transaction_hash)
                 .map(|pos| pos as i32);
 
             // Process each trace in the vector of traces

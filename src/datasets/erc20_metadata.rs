@@ -1,18 +1,15 @@
 use crate::record_values;
 use crate::db_writer::DbWriter;
 use alloy::{sol, sol_types::SolCall, primitives::hex};
-use reth_primitives::{SealedBlockWithSenders, Receipt};
+use alloy_network::TransactionBuilder;
 use reth_node_api::FullNodeComponents;
-use reth_rpc::EthApi;
-use reth_rpc_eth_api::helpers::EthCall;
-use reth_rpc_eth_api::helpers::{Call, LoadPendingBlock};
-use reth_rpc_eth_api::FullEthApiTypes;
+use reth_rpc_eth_api::helpers::FullEthApi;
 use alloy_rpc_types::{state::EvmOverrides, BlockId};
-use alloy_rpc_types_eth::{TransactionTrait, transaction::TransactionRequest};
+use alloy_rpc_types_eth::TransactionTrait;
 use alloy_rpc_types_trace::parity::{TraceOutput, Action};
 use chrono::Utc;
 use eyre::Result;
-use crate::indexer::ProcessingComponents;
+use crate::indexer::{ProcessingComponents, EthereumBlockData};
 
 // Define the complete ERC20 interface
 sol! {
@@ -57,16 +54,18 @@ fn is_erc20_contract(code: &[u8]) -> bool {
     has_required && has_optional
 }
 
-pub async fn process_erc20_metadata<Node: FullNodeComponents>(
-    block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-    components: ProcessingComponents<Node>,
+pub async fn process_erc20_metadata<Node: FullNodeComponents, EthApi: FullEthApi>(
+    block_data: &EthereumBlockData,
+    components: ProcessingComponents<Node, EthApi>,
     writer: &mut DbWriter,
 ) -> Result<()>
 where
-    EthApi<Node::Provider, Node::Pool, Node::Network, Node::Evm>: Call + LoadPendingBlock + FullEthApiTypes,
+    EthApi: reth_rpc_eth_api::EthApiTypes,
+    <EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes: reth_rpc_convert::RpcTypes + alloy_network::Network,
+    <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes>,
 {
     let block = &block_data.0;
-    let block_number = block.block.header.header().number;
+    let block_number = block.num_hash().number;
 
     // Look for contract creations in traces
     if let Some(traces) = components.block_traces {
@@ -81,23 +80,22 @@ where
                             let contract_address = result.address;
 
                             // Get chain_id by finding the transaction in the block
-                            let chain_id = block.block.body().transactions()
-                                .find(|tx| tx.to_owned().hash() == trace.transaction_hash)
+                            let chain_id = block.body().transactions()
+                                .find(|tx| *tx.to_owned().hash() == trace.transaction_hash)
                                 .and_then(|tx| tx.chain_id())
                                 .map(|id| id as i64);
 
                             // Extract name from the contract
                             let name = {
-                                let tx_request = TransactionRequest::default()
-                                    .to(contract_address)
-                                    .input(IERC20::nameCall::SELECTOR.to_vec().into());
+                                let mut tx_req = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+                                tx_req = tx_req.with_to(contract_address).with_input(IERC20::nameCall::SELECTOR.to_vec());
 
-                                match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
+                                match components.eth_api.call(tx_req, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                                     Ok(output) => {
                                         let output_vec = output.to_vec();
-                                        let decoded = IERC20::nameCall::abi_decode_returns(&output_vec, true);
+                                        let decoded = IERC20::nameCall::abi_decode_returns(&output_vec);
                                         match decoded {
-                                            Ok(name_struct) => Some(name_struct._0),
+                                            Ok(name_struct) => Some(name_struct),
                                             Err(_) => Some("Unknown".to_string())
                                         }
                                     },
@@ -107,16 +105,15 @@ where
 
                             // Extract symbol from the contract
                             let symbol = {
-                                let tx_request = TransactionRequest::default()
-                                    .to(contract_address)
-                                    .input(IERC20::symbolCall::SELECTOR.to_vec().into());
+                                let mut tx_req = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+                                tx_req = tx_req.with_to(contract_address).with_input(IERC20::symbolCall::SELECTOR.to_vec());
 
-                                match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
+                                match components.eth_api.call(tx_req, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                                     Ok(output) => {
                                         let output_vec = output.to_vec();
-                                        let decoded = IERC20::symbolCall::abi_decode_returns(&output_vec, true);
+                                        let decoded = IERC20::symbolCall::abi_decode_returns(&output_vec);
                                         match decoded {
-                                            Ok(symbol) => Some(symbol._0),
+                                            Ok(symbol) => Some(symbol),
                                             Err(_) => Some("???".to_string())
                                         }
                                     },
@@ -126,16 +123,15 @@ where
 
                             // Extract decimals from the contract
                             let decimals = {
-                                let tx_request = TransactionRequest::default()
-                                    .to(contract_address)
-                                    .input(IERC20::decimalsCall::SELECTOR.to_vec().into());
+                                let mut tx_req = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+                                tx_req = tx_req.with_to(contract_address).with_input(IERC20::decimalsCall::SELECTOR.to_vec());
 
-                                match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
+                                match components.eth_api.call(tx_req, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                                     Ok(output) => {
                                         let output_vec = output.to_vec();
-                                        let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec, true);
+                                        let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec);
                                         match decoded {
-                                            Ok(decimals) => Some(decimals._0 as i32),
+                                            Ok(decimals) => Some(decimals as i32),
                                             Err(_) => Some(18)
                                         }
                                     },

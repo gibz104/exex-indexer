@@ -3,11 +3,11 @@ use crate::db_writer::DbWriter;
 use alloy::primitives::{hex, keccak256, Address};
 use alloy_rpc_types_eth::TransactionTrait;
 use alloy_rpc_types_trace::parity::{TraceResultsWithTransactionHash, Action, TraceOutput};
-use reth_primitives::{SealedBlockWithSenders, Receipt};
 use chrono::Utc;
 use eyre::Result;
 use reth_node_api::FullNodeComponents;
-use crate::indexer::ProcessingComponents;
+use reth_rpc_eth_api::helpers::FullEthApi;
+use crate::indexer::{ProcessingComponents, EthereumBlockData};
 
 
 /// Find the deployer (originating EOA) from a set of transaction traces
@@ -36,14 +36,14 @@ fn find_deployer(traces: &[TraceResultsWithTransactionHash], current_trace: &Tra
         })
 }
 
-pub async fn process_contracts<Node: FullNodeComponents>(
-    block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-    components: ProcessingComponents<Node>,
+pub async fn process_contracts<Node: FullNodeComponents, EthApi: FullEthApi>(
+    block_data: &EthereumBlockData,
+    components: ProcessingComponents<Node, EthApi>,
     writer: &mut DbWriter,
 ) -> Result<()> {
     let block = &block_data.0;
-    let block_number = block.block.header.header().number;
-    let block_hash = block.block.header.hash();
+    let block_number = block.num_hash().number;
+    let block_hash = block.num_hash().hash;
 
     if let Some(traces) = components.block_traces {
         let mut create_index = 0;
@@ -83,9 +83,9 @@ pub async fn process_contracts<Node: FullNodeComponents>(
                                 init_code.len() as i32,
                                 deployed_code.len() as i32,
                                 hex::encode(&code_hash),
-                                block.body().transactions
+                                block.clone().into_transactions()
                                     .iter()
-                                    .find(|tx| tx.hash() == trace.transaction_hash)
+                                    .find(|tx| tx.tx_hash().clone() == trace.transaction_hash)
                                     .and_then(|tx| tx.chain_id())
                                     .map(|id| id as i64),
                                 Utc::now(),

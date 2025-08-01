@@ -2,25 +2,25 @@ use crate::record_values;
 use crate::db_writer::DbWriter;
 use alloy::primitives::hex;
 use alloy_rpc_types_trace::parity::{Action, TraceOutput};
-use reth_primitives::{SealedBlockWithSenders, Receipt};
 use chrono::Utc;
 use eyre::Result;
 use reth_node_api::FullNodeComponents;
-use crate::indexer::ProcessingComponents;
+use reth_rpc_eth_api::helpers::FullEthApi;
+use crate::indexer::{ProcessingComponents, EthereumBlockData};
 
-pub async fn process_traces<Node: FullNodeComponents>(
-    block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-    components: ProcessingComponents<Node>,
+pub async fn process_traces<Node: FullNodeComponents, EthApi: FullEthApi>(
+    block_data: &EthereumBlockData,
+    components: ProcessingComponents<Node, EthApi>,
     writer: &mut DbWriter,
 ) -> Result<()> {
     let block = &block_data.0;
     let receipts = &block_data.1;
-    let block_number = block.block.header.header().number;
-    let block_hash = block.block.header.hash();
+    let block_number = block.num_hash().number;
+    let block_hash = block.num_hash().hash;
 
     if let Some(traces) = components.block_traces {
         for (tx_idx, (trace, receipt)) in traces.iter().zip(receipts.iter()).enumerate() {
-            let tx_success = receipt.as_ref().map(|r| r.success).unwrap_or(false);
+            let tx_success = receipt.success;
             let tx_hash = trace.transaction_hash;
 
             // Process each trace in the vector of traces

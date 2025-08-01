@@ -1,34 +1,32 @@
 use crate::record_values;
 use crate::db_writer::DbWriter;
-use alloy_rpc_types_eth::TransactionTrait;
-use reth_primitives::{SealedBlockWithSenders, Receipt};
-use reth_primitives_traits::transaction::signed::SignedTransaction;
+use alloy_consensus::transaction::SignerRecoverable;  // This allows us to use `tx.recover_signer()`
 use chrono::Utc;
 use eyre::Result;
 use reth_node_api::FullNodeComponents;
-use crate::indexer::ProcessingComponents;
+use reth_rpc_eth_api::helpers::FullEthApi;
+use alloy_rpc_types_eth::TransactionTrait;  // This trait allows us to call methods directly on tx like access_list()
+use crate::indexer::{ProcessingComponents, EthereumBlockData};
 
-pub async fn process_transactions<Node: FullNodeComponents>(
-    block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-    _components: ProcessingComponents<Node>,
+pub async fn process_transactions<Node: FullNodeComponents, EthApi: FullEthApi>(
+    block_data: &EthereumBlockData,
+    _components: ProcessingComponents<Node, EthApi>,
     writer: &mut DbWriter,
 ) -> Result<()> {
     let block = &block_data.0;
     let receipts = &block_data.1;
-    let block_number = block.block.header.header().number;
+    let block_number = block.num_hash().number;
 
     // Process each transaction
     let mut previous_cumulative_gas = 0;
     for (tx, receipt) in block.body().transactions.iter().zip(receipts.iter()) {
-        let success = receipt.as_ref().map(|r| r.success);
-        let log_count = receipt.as_ref().map(|r| r.logs.len() as i64);
-
+        let success = receipt.success;
+        let log_count = receipt.logs.len() as i64;
+        
         // Calculate individual gas used for this transaction
-        let gas_used = receipt.as_ref().map(|r| {
-            let individual_gas = r.cumulative_gas_used - previous_cumulative_gas;
-            previous_cumulative_gas = r.cumulative_gas_used;
-            individual_gas as i64
-        });
+        let individual_gas = receipt.cumulative_gas_used - previous_cumulative_gas;
+        previous_cumulative_gas = receipt.cumulative_gas_used;
+        let gas_used = individual_gas as i64;
 
         // Convert AccessList to JSON string
         let access_list_str = tx.access_list()

@@ -1,26 +1,21 @@
 use crate::record_values;
-use crate::indexer::ProcessingComponents;
+use crate::indexer::{ProcessingComponents, EthereumBlockData};
 use crate::db_writer::DbWriter;
 use alloy::{
     sol,
     sol_types::{SolCall, SolEvent},
     primitives::{address, b256, Address, B256, U256, U160},
 };
-use alloy_consensus::BlockHeader;
 use reth::providers::{StateProviderFactory};
 use reth_node_api::FullNodeComponents;
-use reth_primitives::{SealedBlockWithSenders, Receipt};
 use eyre::Result;
 use chrono::Utc;
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::helpers::FullEthApi;
 use alloy_rpc_types::{state::EvmOverrides, BlockId};
-use alloy_rpc_types_eth::transaction::TransactionRequest;
 use std::collections::HashMap;
-use reth_rpc::EthApi;
-use reth_rpc_eth_api::FullEthApiTypes;
-use reth_rpc_eth_api::helpers::{Call, LoadPendingBlock};
 use serde::Deserialize;
 use reth::providers::StateProvider;
+use alloy_network::TransactionBuilder;
 
 // Add Swap event definition for UniV3
 sol! {
@@ -201,14 +196,16 @@ impl UniV3PriceOracle {
         None
     }
 
-    async fn calculate_pool_tvl<Node: FullNodeComponents>(
+    async fn calculate_pool_tvl<Node: FullNodeComponents, EthApi: FullEthApi>(
         &self,
         pool: &PoolInfo,
-        components: &ProcessingComponents<Node>,
+        components: &ProcessingComponents<Node, EthApi>,
         block_id: BlockId,
     ) -> Option<f64>
     where
-        EthApi<Node::Provider, Node::Pool, Node::Network, Node::Evm>: Call + LoadPendingBlock + FullEthApiTypes,
+        EthApi: reth_rpc_eth_api::EthApiTypes,
+        <EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes: reth_rpc_convert::RpcTypes + alloy_network::Network,
+        <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes>,
     {
         let preferred_base = if pool.token0 == self.usdt_address || pool.token1 == self.usdt_address {
             Some(self.usdt_address)
@@ -223,15 +220,14 @@ impl UniV3PriceOracle {
         let price1 = self.get_token_price(pool.token1, preferred_base)?;
 
         // Get token0 balance
-        let tx_request0 = TransactionRequest::default()
-            .to(pool.token0)
-            .input(IERC20::balanceOfCall { account: pool.pair_address }.abi_encode().into());
+        let mut tx_request0 = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+        tx_request0 = tx_request0.with_to(pool.token0).with_input(IERC20::balanceOfCall { account: pool.pair_address }.abi_encode());
 
         let balance0 = match components.eth_api.call(tx_request0, Some(block_id), EvmOverrides::default()).await {
             Ok(output) => {
                 let output_vec = output.to_vec();
-                match IERC20::balanceOfCall::abi_decode_returns(&output_vec, true) {
-                    Ok(decoded) => decoded._0,
+                match IERC20::balanceOfCall::abi_decode_returns(&output_vec) {
+                    Ok(decoded) => decoded,
                     Err(_) => return None,
                 }
             },
@@ -239,15 +235,14 @@ impl UniV3PriceOracle {
         };
 
         // Get token1 balance
-        let tx_request1 = TransactionRequest::default()
-            .to(pool.token1)
-            .input(IERC20::balanceOfCall { account: pool.pair_address }.abi_encode().into());
+        let mut tx_request1 = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+        tx_request1 = tx_request1.with_to(pool.token1).with_input(IERC20::balanceOfCall { account: pool.pair_address }.abi_encode());
 
         let balance1 = match components.eth_api.call(tx_request1, Some(block_id), EvmOverrides::default()).await {
             Ok(output) => {
                 let output_vec = output.to_vec();
-                match IERC20::balanceOfCall::abi_decode_returns(&output_vec, true) {
-                    Ok(decoded) => decoded._0,
+                match IERC20::balanceOfCall::abi_decode_returns(&output_vec) {
+                    Ok(decoded) => decoded,
                     Err(_) => return None,
                 }
             },
@@ -279,16 +274,18 @@ fn read_slot0(storage_value: B256) -> eyre::Result<Slot0Data> {
     })
 }
 
-pub async fn process_uni_v3_pools_volume_and_tvl<Node: FullNodeComponents>(
-    block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-    components: ProcessingComponents<Node>,
+pub async fn process_uni_v3_pools_volume_and_tvl<Node: FullNodeComponents, EthApi: FullEthApi>(
+    block_data: &EthereumBlockData,
+    components: ProcessingComponents<Node, EthApi>,
     writer: &mut DbWriter,
 ) -> Result<()>
 where
-    EthApi<Node::Provider, Node::Pool, Node::Network, Node::Evm>: Call + LoadPendingBlock + FullEthApiTypes,
+    EthApi: reth_rpc_eth_api::EthApiTypes,
+    <EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes: reth_rpc_convert::RpcTypes + alloy_network::Network,
+    <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes>,
 {
-    let block_number = block_data.0.block.header.number();
-    let block_hash = block_data.0.block.hash();
+    let block_number = block_data.0.num_hash().number;
+    let block_hash = block_data.0.num_hash().hash;
     let mut oracle = UniV3PriceOracle::new(WETH_ADDRESS, USDC_ADDRESS, USDT_ADDRESS);
 
     // Get configured pools from config
@@ -310,15 +307,14 @@ where
 
         // Read token0 and token1 addresses using eth_api since they're immutable variables
         let token0 = {
-            let tx_request = TransactionRequest::default()
-                .to(*pair_address)
-                .input(IUniswapV3Pool::token0Call::SELECTOR.to_vec().into());
+            let mut tx_request = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+            tx_request = tx_request.with_to(*pair_address).with_input(IUniswapV3Pool::token0Call::SELECTOR.to_vec());
 
             match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                 Ok(output) => {
                     let output_vec = output.to_vec();
-                    let decoded = IUniswapV3Pool::token0Call::abi_decode_returns(&output_vec, true)?;
-                    decoded._0
+                    let decoded = IUniswapV3Pool::token0Call::abi_decode_returns(&output_vec)?;
+                    decoded
                 },
                 Err(e) => {
                     println!("Warning: Failed to call token0 for pool {}: {}", pair_address, e);
@@ -328,15 +324,14 @@ where
         };
 
         let token1 = {
-            let tx_request = TransactionRequest::default()
-                .to(*pair_address)
-                .input(IUniswapV3Pool::token1Call::SELECTOR.to_vec().into());
+            let mut tx_request = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+            tx_request = tx_request.with_to(*pair_address).with_input(IUniswapV3Pool::token1Call::SELECTOR.to_vec());
 
             match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                 Ok(output) => {
                     let output_vec = output.to_vec();
-                    let decoded = IUniswapV3Pool::token1Call::abi_decode_returns(&output_vec, true)?;
-                    decoded._0
+                    let decoded = IUniswapV3Pool::token1Call::abi_decode_returns(&output_vec)?;
+                    decoded
                 },
                 Err(e) => {
                     println!("Warning: Failed to call token1 for pool {}: {}", pair_address, e);
@@ -347,30 +342,28 @@ where
 
         // Get decimals for both tokens using eth_api since they're token-specific
         let decimals0 = {
-            let tx_request = TransactionRequest::default()
-                .to(token0)
-                .input(IERC20::decimalsCall::SELECTOR.to_vec().into());
+            let mut tx_request = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+            tx_request = tx_request.with_to(token0).with_input(IERC20::decimalsCall::SELECTOR.to_vec());
 
             match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                 Ok(output) => {
                     let output_vec = output.to_vec();
-                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec, true)?;
-                    decoded._0 as u8
+                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec)?;
+                    decoded as u8
                 },
                 Err(_) => 18
             }
         };
 
         let decimals1 = {
-            let tx_request = TransactionRequest::default()
-                .to(token1)
-                .input(IERC20::decimalsCall::SELECTOR.to_vec().into());
+            let mut tx_request = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+            tx_request = tx_request.with_to(token1).with_input(IERC20::decimalsCall::SELECTOR.to_vec());
 
             match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                 Ok(output) => {
                     let output_vec = output.to_vec();
-                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec, true)?;
-                    decoded._0 as u8
+                    let decoded = IERC20::decimalsCall::abi_decode_returns(&output_vec)?;
+                    decoded as u8
                 },
                 Err(_) => 18
             }
@@ -393,15 +386,14 @@ where
 
         // Get tick spacing using eth_api
         let tick_spacing = {
-            let tx_request = TransactionRequest::default()
-                .to(*pair_address)
-                .input(IUniswapV3Pool::tickSpacingCall::SELECTOR.to_vec().into());
+            let mut tx_request = <<EthApi as reth_rpc_eth_api::EthApiTypes>::NetworkTypes as reth_rpc_convert::RpcTypes>::TransactionRequest::default();
+            tx_request = tx_request.with_to(*pair_address).with_input(IUniswapV3Pool::tickSpacingCall::SELECTOR.to_vec());
 
             match components.eth_api.call(tx_request, Some(BlockId::from(block_number)), EvmOverrides::default()).await {
                 Ok(output) => {
                     let output_vec = output.to_vec();
-                    let decoded = IUniswapV3Pool::tickSpacingCall::abi_decode_returns(&output_vec, true)?;
-                    let spacing = decoded._0.to_string().parse::<i32>().unwrap_or(60) as u32;
+                    let decoded = IUniswapV3Pool::tickSpacingCall::abi_decode_returns(&output_vec)?;
+                    let spacing = decoded.to_string().parse::<i32>().unwrap_or(60) as u32;
                     if spacing == 0 {
                         println!("Warning: Pool {} returned zero tick spacing, using default of 60", pair_address);
                         60
@@ -447,50 +439,48 @@ where
 
     // Process Swap events from logs
     let receipts = &block_data.1;
-    for (_tx, receipt) in block_data.0.transactions().into_iter().zip(receipts) {
-        if let Some(receipt) = receipt {
-            for log in &receipt.logs {
-                // Check if the log is from one of our tracked pools
-                if !pool_addresses.contains(&log.address) {
-                    continue;
+    for (_tx, receipt) in block_data.0.body().transactions.iter().zip(receipts) {
+        for log in &receipt.logs {
+            // Check if the log is from one of our tracked pools
+            if !pool_addresses.contains(&log.address) {
+                continue;
+            }
+
+            // Check if this is a Swap event
+            if log.topics().get(0) != Some(&Swap::SIGNATURE_HASH) {
+                continue;
+            }
+
+            // Get pool metadata
+            let metadata = match pool_metadata.get(&log.address) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            match Swap::decode_raw_log(log.topics(), &log.data.data) {
+                Ok(swap) => {
+                    let entry = pool_trades.entry(log.address).or_insert((0, 0.0));
+                    entry.0 += 1; // Increment trade count
+
+                    // Calculate volume for token0 side (handle negative amounts)
+                    let amount0 = swap.amount0.abs().to_string().parse::<f64>().unwrap_or(0.0) / 10f64.powi(metadata.decimals0 as i32);
+
+                    // Calculate volume for token1 side (handle negative amounts)
+                    let amount1 = swap.amount1.abs().to_string().parse::<f64>().unwrap_or(0.0) / 10f64.powi(metadata.decimals1 as i32);
+
+                    // Get token prices using the oracle
+                    let price0 = oracle.get_token_price(metadata.token0, None);
+                    let price1 = oracle.get_token_price(metadata.token1, None);
+
+                    // Calculate USD volumes
+                    let volume0_usd = price0.map(|p| amount0 * p).unwrap_or(0.0);
+                    let volume1_usd = price1.map(|p| amount1 * p).unwrap_or(0.0);
+
+                    // Use the larger USD volume
+                    entry.1 += volume0_usd.max(volume1_usd);
                 }
-
-                // Check if this is a Swap event
-                if log.topics().get(0) != Some(&Swap::SIGNATURE_HASH) {
-                    continue;
-                }
-
-                // Get pool metadata
-                let metadata = match pool_metadata.get(&log.address) {
-                    Some(m) => m,
-                    None => continue,
-                };
-
-                match Swap::decode_raw_log(log.topics(), &log.data.data, true) {
-                    Ok(swap) => {
-                        let entry = pool_trades.entry(log.address).or_insert((0, 0.0));
-                        entry.0 += 1; // Increment trade count
-
-                        // Calculate volume for token0 side (handle negative amounts)
-                        let amount0 = swap.amount0.abs().to_string().parse::<f64>().unwrap_or(0.0) / 10f64.powi(metadata.decimals0 as i32);
-
-                        // Calculate volume for token1 side (handle negative amounts)
-                        let amount1 = swap.amount1.abs().to_string().parse::<f64>().unwrap_or(0.0) / 10f64.powi(metadata.decimals1 as i32);
-
-                        // Get token prices using the oracle
-                        let price0 = oracle.get_token_price(metadata.token0, None);
-                        let price1 = oracle.get_token_price(metadata.token1, None);
-
-                        // Calculate USD volumes
-                        let volume0_usd = price0.map(|p| amount0 * p).unwrap_or(0.0);
-                        let volume1_usd = price1.map(|p| amount1 * p).unwrap_or(0.0);
-
-                        // Use the larger USD volume
-                        entry.1 += volume0_usd.max(volume1_usd);
-                    }
-                    Err(e) => {
-                        println!("Failed to decode swap event: {:?}", e);
-                    }
+                Err(e) => {
+                    println!("Failed to decode swap event: {:?}", e);
                 }
             }
         }
@@ -541,7 +531,7 @@ where
                 continue;
             }
         };
-        
+
         writer.write_record(record_values![
             block_number as i64,
             pool_info.pair_address,
@@ -557,4 +547,3 @@ where
 
     Ok(())
 }
-

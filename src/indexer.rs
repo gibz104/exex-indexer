@@ -16,47 +16,54 @@ use crate::datasets::{
     uni_v2_pools_volume_and_tvl::process_uni_v2_pools_volume_and_tvl,
     uni_v3_pools_volume_and_tvl::process_uni_v3_pools_volume_and_tvl
 };
-use alloy_consensus::{Header, Block, BlockHeader};
 use alloy_rpc_types::{BlockId, BlockNumberOrTag};
 use alloy_rpc_types_trace::parity::{TraceResultsWithTransactionHash, TraceType};
 use eyre::Result;
-use reth::builder::NodeTypes;
-use reth::primitives::{EthereumHardforks, NodePrimitives};
-use reth_primitives::{TransactionSigned, Receipt, SealedBlockWithSenders};
-use reth_node_api::{ConfigureEvmEnv, FullNodeComponents, FullNodeTypes};
-use reth_rpc::EthApi;
-use reth_rpc_eth_api::{FullEthApiTypes, helpers::{Call, LoadPendingBlock}};
+use reth_ethereum::{
+    node::api::FullNodeComponents,
+    rpc::api::eth::helpers::FullEthApi,
+};
+use reth_rpc_eth_api::EthApiTypes;
+use reth_rpc_convert::RpcTypes;
+use alloy_network::{Network, TransactionBuilder};
+use reth_primitives::{RecoveredBlock, Block, Receipt};
 use reth_tracing::tracing::{info, warn};
 use std::{sync::Arc, time::Instant, collections::HashSet};
+use reth_rpc::TraceApi;
 use tokio_postgres::Client;
+
+// Simplified type aliases for Ethereum
+pub type EthereumBlock = RecoveredBlock<Block>;
+pub type EthereumReceipts = Vec<Receipt>;
+pub type EthereumBlockData = (EthereumBlock, EthereumReceipts);
 
 // Structure to hold all the components needed for processing
 #[derive(Clone)]
-pub struct ProcessingComponents<Node: FullNodeComponents> {
-    pub eth_api: Arc<EthApi<Node::Provider, Node::Pool, Node::Network, Node::Evm>>,
+pub struct ProcessingComponents<Node: FullNodeComponents, EthApi: FullEthApi> {
+    pub eth_api: Arc<EthApi>,
     pub block_traces: Option<Vec<TraceResultsWithTransactionHash>>,
     pub provider: Node::Provider,
     pub client: Arc<Client>,
     pub config: Config,
 }
 
-struct ProcessorInfo<Node: FullNodeComponents> {
+struct ProcessorInfo<Node: FullNodeComponents, EthApi: FullEthApi> {
     table_name: &'static str,
     processor_name: &'static str,
     processor: for<'a> fn(
-        &'a (SealedBlockWithSenders, Vec<Option<Receipt>>),
-        ProcessingComponents<Node>,
+        &'a EthereumBlockData,
+        ProcessingComponents<Node, EthApi>,
         &'a mut DbWriter
     ) -> futures::future::BoxFuture<'a, Result<()>>,
 }
 
-impl<Node: FullNodeComponents> ProcessorInfo<Node> {
+impl<Node: FullNodeComponents, EthApi: FullEthApi> ProcessorInfo<Node, EthApi> {
     fn new(
         table_name: &'static str,
         processor_name: &'static str,
         processor: for<'a> fn(
-            &'a (SealedBlockWithSenders, Vec<Option<Receipt>>),
-            ProcessingComponents<Node>,
+            &'a EthereumBlockData,
+            ProcessingComponents<Node, EthApi>,
             &'a mut DbWriter
         ) -> futures::future::BoxFuture<'a, Result<()>>,
     ) -> Self {
@@ -68,30 +75,18 @@ impl<Node: FullNodeComponents> ProcessorInfo<Node> {
     }
 }
 
-pub struct Indexer<Node: FullNodeComponents> {
-    processors: Vec<ProcessorInfo<Node>>,
+pub struct Indexer<Node: FullNodeComponents, EthApi: FullEthApi> {
+    processors: Vec<ProcessorInfo<Node, EthApi>>,
     config: Config,
 }
 
-impl<Node> Indexer<Node>
-where
-    Node: FullNodeComponents + FullNodeTypes,
-    Node::Types: NodeTypes,
-    <Node::Types as NodeTypes>::ChainSpec: EthereumHardforks,
-    <Node::Types as NodeTypes>::Primitives: NodePrimitives<
-        BlockHeader = Header,
-        Block = Block<TransactionSigned>,
-        Receipt = Receipt,
-        SignedTx = TransactionSigned,
-    >,
-    Node::Provider: reth::providers::BlockReader<Block = Block<TransactionSigned>>
-    + reth::providers::HeaderProvider<Header = Header>
-    + reth::providers::ReceiptProvider<Receipt = Receipt>
-    + reth::providers::TransactionsProvider<Transaction = TransactionSigned>,
-    Node::Evm: ConfigureEvmEnv<Header = Header>,
-    EthApi<Node::Provider, Node::Pool, Node::Network, Node::Evm>: Call + LoadPendingBlock + FullEthApiTypes,
-{
-    pub fn new(config: Config) -> Self {
+impl<Node: FullNodeComponents, EthApi: FullEthApi> Indexer<Node, EthApi> {
+    pub fn new(config: Config) -> Self
+    where
+        EthApi: EthApiTypes,
+        <EthApi as EthApiTypes>::NetworkTypes: RpcTypes + Network,
+        <<EthApi as EthApiTypes>::NetworkTypes as RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as EthApiTypes>::NetworkTypes>,
+    {
         let mut indexer = Self {
             processors: Vec::new(),
             config,
@@ -116,72 +111,77 @@ where
         indexer
     }
 
-    pub fn add_processor(&mut self, table_name: &'static str, processor_name: &'static str) {
+    pub fn add_processor(&mut self, table_name: &'static str, processor_name: &'static str)
+    where
+        EthApi: EthApiTypes,
+        <EthApi as EthApiTypes>::NetworkTypes: RpcTypes + Network,
+        <<EthApi as EthApiTypes>::NetworkTypes as RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as EthApiTypes>::NetworkTypes>,
+    {
         let processor = match table_name {
             "headers" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_headers::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_headers::<Node, EthApi>(block_data, components, writer))
             ),
             "transactions" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_transactions::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_transactions::<Node, EthApi>(block_data, components, writer))
             ),
             "logs" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_logs::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_logs::<Node, EthApi>(block_data, components, writer))
             ),
             "erc20_transfers" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_erc20_transfers::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_erc20_transfers::<Node, EthApi>(block_data, components, writer))
             ),
             "traces" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_traces::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_traces::<Node, EthApi>(block_data, components, writer))
             ),
             "native_transfers" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_native_transfers::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_native_transfers::<Node, EthApi>(block_data, components, writer))
             ),
             "contracts" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_contracts::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_contracts::<Node, EthApi>(block_data, components, writer))
             ),
             "erc20_metadata" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_erc20_metadata::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_erc20_metadata::<Node, EthApi>(block_data, components, writer))
             ),
             "uni_v2_pools" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_uni_v2_pools::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_uni_v2_pools::<Node, EthApi>(block_data, components, writer))
             ),
             "uni_v3_pools" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_uni_v3_pools::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_uni_v3_pools::<Node, EthApi>(block_data, components, writer))
             ),
             "uni_v4_pools" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_uni_v4_pools::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_uni_v4_pools::<Node, EthApi>(block_data, components, writer))
             ),
             "uni_v2_pools_volume_and_tvl" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_uni_v2_pools_volume_and_tvl::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_uni_v2_pools_volume_and_tvl::<Node, EthApi>(block_data, components, writer))
             ),
             "uni_v3_pools_volume_and_tvl" => ProcessorInfo::new(
                 table_name,
                 processor_name,
-                |block_data, components, writer| Box::pin(process_uni_v3_pools_volume_and_tvl::<Node>(block_data, components, writer))
+                |block_data, components, writer| Box::pin(process_uni_v3_pools_volume_and_tvl::<Node, EthApi>(block_data, components, writer))
             ),
             _ => return, // Skip unknown processors
         };
@@ -216,41 +216,21 @@ where
 
     pub async fn process_blocks(
         &self,
-        blocks_and_receipts: impl Iterator<Item = (&SealedBlockWithSenders, &Vec<Option<Receipt>>)>,
+        blocks_and_receipts: Vec<EthereumBlockData>,
         client: &Arc<Client>,
         provider: Node::Provider,
-        evm_config: Arc<Node::Evm>,
-        pool: Arc<Node::Pool>,
-        network: Arc<Node::Network>,
+        eth_api: &EthApi,
+        trace_api: &TraceApi<EthApi>,
     ) -> Result<()>
     where
-        Node::Evm: ConfigureEvmEnv<Header = Header>,
-        EthApi<Node::Provider, Node::Pool, Node::Network, Node::Evm>: Call + LoadPendingBlock + FullEthApiTypes,
+        Node: FullNodeComponents,
+        EthApi: FullEthApi + EthApiTypes,
+        <EthApi as EthApiTypes>::NetworkTypes: RpcTypes + Network,
+        <<EthApi as EthApiTypes>::NetworkTypes as RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as EthApiTypes>::NetworkTypes>,
     {
-        // Convert the iterator items into owned values directly
-        let blocks_and_receipts: Vec<_> = blocks_and_receipts
-            .map(|(block, receipts)| (block.clone(), receipts.clone()))
-            .collect();
-
         for (block, receipts) in blocks_and_receipts {
-            let block_number = block.block.header().number();
+            let block_number = block.num_hash().number;
             let block_id = BlockId::Number(BlockNumberOrTag::from(block_number));
-
-            // Create EthAPI
-            let eth_api = crate::utils::create_eth_api::<Node>(
-                provider.clone(),
-                (*evm_config).clone(),
-                (*pool).clone(),
-                (*network).clone()
-            );
-
-            // Create TraceAPI
-            let trace_api = crate::utils::create_trace_api::<Node>(
-                provider.clone(),
-                (*evm_config).clone(),
-                (*pool).clone(),
-                (*network).clone()
-            );
 
             // Get traces once for the block
             let block_traces = match trace_api.replay_block_transactions(
@@ -266,7 +246,7 @@ where
 
             // Create components for processing
             let components = ProcessingComponents {
-                eth_api: eth_api.clone(),
+                eth_api: Arc::new(eth_api.clone()),
                 block_traces,
                 provider: provider.clone(),
                 client: Arc::clone(client),
@@ -284,20 +264,16 @@ where
 
     pub async fn process_block_data(
         &self,
-        block_data: &(SealedBlockWithSenders, Vec<Option<Receipt>>),
-        components: ProcessingComponents<Node>,
+        block_data: &EthereumBlockData,
+        components: ProcessingComponents<Node, EthApi>,
     ) -> Result<()>
     where
-        Node::Types: NodeTypes,
-        <Node::Types as NodeTypes>::ChainSpec: EthereumHardforks,
-        <Node::Types as NodeTypes>::Primitives: NodePrimitives<
-            BlockHeader = Header,
-            Block = Block<TransactionSigned>,
-            Receipt = Receipt,
-            SignedTx = TransactionSigned
-        >,
+        Node: FullNodeComponents,
+        EthApi: FullEthApi + EthApiTypes,
+        <EthApi as EthApiTypes>::NetworkTypes: RpcTypes + Network,
+        <<EthApi as EthApiTypes>::NetworkTypes as RpcTypes>::TransactionRequest: Default + TransactionBuilder<<EthApi as EthApiTypes>::NetworkTypes>,
     {
-        let block_number = block_data.0.block.header.header().number;
+        let block_number = block_data.0.num_hash().number;
 
         // Create a vector to store all processing tasks
         let mut tasks = Vec::new();

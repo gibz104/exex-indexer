@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2025-07-31
+
+### Changed
+
+- Updated Reth from `v1.1.5` to `v1.6.0`
+
+- Replaced deprecated `SealedBlockWithSenders` with `RecoveredBlock`
+
+- Refactored ExEx and EthApi usage to follow best practices in Reth v1.6.0
+
+- Refactored trait bounds and usage of `TransactionRequest`
+
+### Removed
+
+- Most helper functions in `utils.rs` to create eth_api and trace_api have been
+  removed since Reth now makes it easier to do this out-of-the-box with their `NodeAddOns`
+
 ## [0.2.0] - 2025-04-07
 
 ### Added
